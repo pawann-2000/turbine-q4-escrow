@@ -182,7 +182,7 @@ test result: ok. 6 passed; 0 failed
 
 | Program        | ID |
 | -------------- | -- |
-| `escrowq42026` | `5Y6HMSgNYbkcBiQCukYvTK56aQarSpq1Nk9aiSsjws2o` |
-| `vault`        | `D4esTuckKbgchn4AaYWFWFoLccnT9kzspXMKf38xzHN4` |
+| `escrowq42026` | `FkubJnmiEvHKY9iyf7jPtLUKZxj8W4F5dXkCQ84a6CaV` |
+| `vault`        | `H5pX7EZBTbAYPqYWHbHeQTzF2T4Errwh2uaLrLWJYesz` |
 
 Program keypairs live in `target/deploy` and are not committed. To deploy from a fresh clone, run `anchor keys sync` after the first build so `declare_id!` matches your local keypairs.
