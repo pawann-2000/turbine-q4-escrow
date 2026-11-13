@@ -15,11 +15,22 @@ pub struct Update<'info> {
 }
 
 impl<'info> Update<'info> {
-    //Maker can change how much token B they want
-    pub fn update_escrow(&mut self, receive: u64) -> Result<()> {
+    //Maker can change the price, the deadline and who is allowed to take
+    pub fn update_escrow(
+        &mut self,
+        receive: u64,
+        expiration: i64,
+        taker: Option<Pubkey>,
+    ) -> Result<()> {
         require!(receive > 0, ErrorCode::InvalidAmount);
+        require!(
+            expiration > Clock::get()?.unix_timestamp,
+            ErrorCode::InvalidExpiration
+        );
 
         self.escrow.receive = receive;
+        self.escrow.expiration = expiration;
+        self.escrow.taker = taker;
         Ok(())
     }
 }

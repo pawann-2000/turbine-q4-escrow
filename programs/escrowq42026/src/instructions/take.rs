@@ -7,7 +7,7 @@ use anchor_spl::{
     },
 };
 
-use crate::{Escrow, ESCROW_SEED};
+use crate::{error::ErrorCode, Escrow, ESCROW_SEED};
 
 #[derive(Accounts)]
 pub struct Take<'info> {
@@ -69,6 +69,17 @@ pub struct Take<'info> {
 }
 
 impl<'info> Take<'info> {
+    //Escrow must not be expired and, if a taker was set, only that taker can take it
+    pub fn check_conditions(&self) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        require!(now < self.escrow.expiration, ErrorCode::EscrowExpired);
+
+        if let Some(taker) = self.escrow.taker {
+            require_keys_eq!(taker, self.taker.key(), ErrorCode::InvalidTaker);
+        }
+        Ok(())
+    }
+
     //Send token B from taker to maker
     pub fn deposit(&mut self) -> Result<()> {
         let cpi_accounts = TransferChecked {

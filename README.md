@@ -3,7 +3,7 @@
 Two Anchor programs written for the Turbin3 builders cohort:
 
 - **vault** – a personal SOL vault (initialize, deposit, withdraw, close)
-- **escrowq42026** – a token swap escrow (make, take, refund, update)
+- **escrowq42026** – a token swap escrow (make, take, refund, update) with a timed, optionally private, offer
 
 Both are tested in Rust with [LiteSVM](https://github.com/LiteSVM/litesvm), so the tests run in-process without a local validator.
 
@@ -63,6 +63,7 @@ The diagrams in [`arch/`](./arch) show each flow.
 pub struct Escrow {
     pub seed: u64,
     pub maker: Pubkey,
+    pub taker: Option<Pubkey>,  // None = anyone can take
     pub mint_a: Pubkey,
     pub mint_b: Pubkey,
     pub receive: u64,           // amount of token B the maker wants
@@ -77,18 +78,30 @@ The escrow PDA is `["escrow", maker, seed]`, so one maker can have many open off
 
 | #  | Instruction | Signer | What it does |
 | -- | ----------- | ------ | ------------ |
-| 0  | `make(seed, deposit, receive, expiration)` | maker | Creates the escrow + vault and deposits token A |
-| 1  | `take()` | taker | Pays the maker in token B, releases token A, closes the vault and escrow |
-| 2  | `refund()` | maker | Returns token A to the maker and closes everything |
-| 3  | `update(receive)` | maker | Changes how much token B the maker wants |
+| 0  | `make(seed, deposit, receive, expiration, taker)` | maker | Creates the escrow + vault and deposits token A |
+| 1  | `take()` | taker | Checks deadline + taker, pays the maker in token B, releases token A, closes the vault and escrow |
+| 2  | `refund()` | maker | Returns token A to the maker and closes everything (works any time, before or after the deadline) |
+| 3  | `update(receive, expiration, taker)` | maker | Changes the price, the deadline and who is allowed to take |
 
 Rent on `take`: the vault rent goes to the taker (it covers creating the maker's token B account if it didn't exist yet), and the escrow rent goes back to the maker. This matches `arch/take.png`.
+
+### Timed escrow (extension)
+
+The escrow runs on the `Clock` sysvar with a signature condition on top:
+
+1. **Deadline** – `make` and `update` reject an `expiration` that is not in the future. `take` reads `Clock::get()?.unix_timestamp` and fails with `EscrowExpired` once `now >= expiration`. After the deadline the only way out is `refund`, so the maker's tokens never get stuck.
+2. **Designated taker** – the maker can pass `Some(pubkey)` as `taker` to reserve the deal for one counterparty, like an OTC trade agreed off-chain. `take` then requires that exact signer, and anyone else gets `InvalidTaker`. Passing `None` keeps it open to everyone.
+
+Together this gives a time-limited private offer: "Alice can buy my 10 A for 5 B, but only until Friday". The maker can still change the price, push the deadline or open it up to everyone with `update`.
 
 ### Errors
 
 | Error               | When |
 | ------------------- | ---- |
+| `EscrowExpired`     | `take` called at or after `expiration` |
+| `InvalidExpiration` | `make`/`update` with a deadline that is not in the future |
 | `InvalidAmount`     | `deposit` or `receive` is zero |
+| `InvalidTaker`      | `take` signed by someone other than the designated taker |
 
 ### Notes
 
@@ -125,27 +138,43 @@ The tests load the compiled `.so` from `target/deploy`, so run `anchor build` fi
 | Test | Checks |
 | ---- | ------ |
 | `test_make` | vault holds the deposit, escrow fields are saved |
+| `test_make_with_past_expiration_fails` | `InvalidExpiration` |
 | `test_take` | both sides get paid, escrow and vault are closed |
+| `test_take_after_expiration_fails` | clock moved to the deadline, `EscrowExpired`, tokens still in the vault |
+| `test_take_with_designated_taker` | a stranger gets `InvalidTaker`, the chosen taker succeeds |
 | `test_refund` | maker gets all of token A back |
-| `test_update` | new price is saved and `take` pays the new price |
+| `test_refund_after_expiration` | refund still works after the deadline |
+| `test_update` | new price/deadline/taker are saved and `take` pays the new price |
 | `test_update_by_non_maker_fails` | only the maker can update (`ConstraintSeeds`) |
+
+Time is moved forward in tests by overwriting the `Clock` sysvar:
+
+```rust
+let mut clock = svm.get_sysvar::<Clock>();
+clock.unix_timestamp = expiration;
+svm.set_sysvar(&clock);
+```
 
 ```
      Running tests/mod.rs (escrowq42026)
+test test_make_with_past_expiration_fails ... ok
 test test_make ... ok
 test test_refund ... ok
-test test_update ... ok
 test test_take ... ok
+test test_take_after_expiration_fails ... ok
+test test_update ... ok
+test test_refund_after_expiration ... ok
+test test_take_with_designated_taker ... ok
 test test_update_by_non_maker_fails ... ok
-test result: ok. 5 passed; 0 failed
+test result: ok. 9 passed; 0 failed
 
      Running tests/mod.rs (vault)
+test test_withdraw_more_than_deposited_fails ... ok
+test test_other_user_cannot_withdraw ... ok
+test test_initialize ... ok
 test test_deposit ... ok
 test test_close ... ok
 test test_withdraw ... ok
-test test_withdraw_more_than_deposited_fails ... ok
-test test_initialize ... ok
-test test_other_user_cannot_withdraw ... ok
 test result: ok. 6 passed; 0 failed
 ```
 

@@ -92,7 +92,7 @@ fn setup() -> Env {
     }
 }
 
-fn make_ix(env: &Env, expiration: i64) -> Instruction {
+fn make_ix(env: &Env, expiration: i64, taker: Option<Pubkey>) -> Instruction {
     Instruction {
         program_id: escrowq42026::id(),
         accounts: escrowq42026::accounts::Make {
@@ -112,6 +112,7 @@ fn make_ix(env: &Env, expiration: i64) -> Instruction {
             deposit: DEPOSIT,
             receive: RECEIVE,
             expiration,
+            taker,
         }
         .data(),
     }
@@ -158,7 +159,13 @@ fn refund_ix(env: &Env) -> Instruction {
     }
 }
 
-fn update_ix(env: &Env, signer: &Pubkey, receive: u64) -> Instruction {
+fn update_ix(
+    env: &Env,
+    signer: &Pubkey,
+    receive: u64,
+    expiration: i64,
+    taker: Option<Pubkey>,
+) -> Instruction {
     Instruction {
         program_id: escrowq42026::id(),
         accounts: escrowq42026::accounts::Update {
@@ -166,7 +173,12 @@ fn update_ix(env: &Env, signer: &Pubkey, receive: u64) -> Instruction {
             escrow: env.escrow,
         }
         .to_account_metas(None),
-        data: escrowq42026::instruction::Update { receive }.data(),
+        data: escrowq42026::instruction::Update {
+            receive,
+            expiration,
+            taker,
+        }
+        .data(),
     }
 }
 
@@ -192,6 +204,12 @@ fn now(svm: &LiteSVM) -> i64 {
     svm.get_sysvar::<Clock>().unix_timestamp
 }
 
+fn set_time(svm: &mut LiteSVM, timestamp: i64) {
+    let mut clock = svm.get_sysvar::<Clock>();
+    clock.unix_timestamp = timestamp;
+    svm.set_sysvar(&clock);
+}
+
 fn token_balance(svm: &LiteSVM, address: &Pubkey) -> u64 {
     let account = svm.get_account(address).unwrap();
     spl_token::state::Account::unpack(&account.data)
@@ -209,7 +227,7 @@ fn test_make() {
     let mut env = setup();
     let expiration = now(&env.svm) + 3600;
 
-    let ix = make_ix(&env, expiration);
+    let ix = make_ix(&env, expiration, None);
     send(&mut env.svm, ix, &env.maker).unwrap();
 
     assert_eq!(token_balance(&env.svm, &env.vault), DEPOSIT);
@@ -221,10 +239,23 @@ fn test_make() {
     let escrow = read_escrow(&env.svm, &env.escrow);
     assert_eq!(escrow.seed, SEED);
     assert_eq!(escrow.maker, env.maker.pubkey());
+    assert_eq!(escrow.taker, None);
     assert_eq!(escrow.mint_a, env.mint_a);
     assert_eq!(escrow.mint_b, env.mint_b);
     assert_eq!(escrow.receive, RECEIVE);
     assert_eq!(escrow.expiration, expiration);
+}
+
+#[test]
+fn test_make_with_past_expiration_fails() {
+    let mut env = setup();
+    let expiration = now(&env.svm) - 1;
+
+    let ix = make_ix(&env, expiration, None);
+    let result = send(&mut env.svm, ix, &env.maker);
+
+    assert_error(result, "InvalidExpiration");
+    assert!(env.svm.get_account(&env.escrow).is_none());
 }
 
 #[test]
@@ -236,7 +267,7 @@ fn test_take() {
     let taker_ata_a = associated_token::get_associated_token_address(&taker, &env.mint_a);
     let taker_ata_b = associated_token::get_associated_token_address(&taker, &env.mint_b);
 
-    let ix = make_ix(&env, now(&env.svm) + 3600);
+    let ix = make_ix(&env, now(&env.svm) + 3600, None);
     send(&mut env.svm, ix, &env.maker).unwrap();
 
     let ix = take_ix(&env, &taker);
@@ -253,10 +284,60 @@ fn test_take() {
 }
 
 #[test]
+fn test_take_after_expiration_fails() {
+    let mut env = setup();
+    let expiration = now(&env.svm) + 3600;
+
+    let ix = make_ix(&env, expiration, None);
+    send(&mut env.svm, ix, &env.maker).unwrap();
+
+    set_time(&mut env.svm, expiration);
+
+    let ix = take_ix(&env, &env.taker.pubkey());
+    let result = send(&mut env.svm, ix, &env.taker);
+
+    assert_error(result, "EscrowExpired");
+    assert_eq!(token_balance(&env.svm, &env.vault), DEPOSIT);
+}
+
+#[test]
+fn test_take_with_designated_taker() {
+    let mut env = setup();
+    let taker = env.taker.pubkey();
+
+    // someone else who also holds token B
+    let stranger = Keypair::new();
+    env.svm.airdrop(&stranger.pubkey(), 1_000_000_000).unwrap();
+    let stranger_ata_b = CreateAssociatedTokenAccount::new(&mut env.svm, &stranger, &env.mint_b)
+        .send()
+        .unwrap();
+    MintTo::new(
+        &mut env.svm,
+        &env.taker,
+        &env.mint_b,
+        &stranger_ata_b,
+        STARTING_BALANCE,
+    )
+    .send()
+    .unwrap();
+
+    let ix = make_ix(&env, now(&env.svm) + 3600, Some(taker));
+    send(&mut env.svm, ix, &env.maker).unwrap();
+
+    let ix = take_ix(&env, &stranger.pubkey());
+    let result = send(&mut env.svm, ix, &stranger);
+    assert_error(result, "InvalidTaker");
+
+    let ix = take_ix(&env, &taker);
+    send(&mut env.svm, ix, &env.taker).unwrap();
+    assert!(env.svm.get_account(&env.escrow).is_none());
+}
+
+#[test]
 fn test_refund() {
     let mut env = setup();
 
-    let ix = make_ix(&env, now(&env.svm) + 3600);
+    let ix = make_ix(&env, now(&env.svm) + 3600, None);
     send(&mut env.svm, ix, &env.maker).unwrap();
 
     let ix = refund_ix(&env);
@@ -268,21 +349,41 @@ fn test_refund() {
 }
 
 #[test]
+fn test_refund_after_expiration() {
+    let mut env = setup();
+    let expiration = now(&env.svm) + 3600;
+
+    let ix = make_ix(&env, expiration, None);
+    send(&mut env.svm, ix, &env.maker).unwrap();
+
+    set_time(&mut env.svm, expiration + 1);
+
+    let ix = refund_ix(&env);
+    send(&mut env.svm, ix, &env.maker).unwrap();
+
+    assert_eq!(token_balance(&env.svm, &env.maker_ata_a), STARTING_BALANCE);
+    assert!(env.svm.get_account(&env.escrow).is_none());
+}
+
+#[test]
 fn test_update() {
     let mut env = setup();
     let maker = env.maker.pubkey();
     let taker = env.taker.pubkey();
     let maker_ata_b = associated_token::get_associated_token_address(&maker, &env.mint_b);
 
-    let ix = make_ix(&env, now(&env.svm) + 3600);
+    let ix = make_ix(&env, now(&env.svm) + 3600, None);
     send(&mut env.svm, ix, &env.maker).unwrap();
 
     let new_receive = 8_000_000;
-    let ix = update_ix(&env, &maker, new_receive);
+    let new_expiration = now(&env.svm) + 7200;
+    let ix = update_ix(&env, &maker, new_receive, new_expiration, Some(taker));
     send(&mut env.svm, ix, &env.maker).unwrap();
 
     let escrow = read_escrow(&env.svm, &env.escrow);
     assert_eq!(escrow.receive, new_receive);
+    assert_eq!(escrow.expiration, new_expiration);
+    assert_eq!(escrow.taker, Some(taker));
 
     // taker now pays the new price
     let ix = take_ix(&env, &taker);
@@ -295,10 +396,10 @@ fn test_update_by_non_maker_fails() {
     let mut env = setup();
     let taker = env.taker.pubkey();
 
-    let ix = make_ix(&env, now(&env.svm) + 3600);
+    let ix = make_ix(&env, now(&env.svm) + 3600, None);
     send(&mut env.svm, ix, &env.maker).unwrap();
 
-    let ix = update_ix(&env, &taker, 1);
+    let ix = update_ix(&env, &taker, 1, now(&env.svm) + 7200, Some(taker));
     let result = send(&mut env.svm, ix, &env.taker);
 
     assert_error(result, "ConstraintSeeds");

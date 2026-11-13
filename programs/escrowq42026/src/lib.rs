@@ -22,14 +22,16 @@ pub mod escrowq42026 {
         deposit: u64,
         receive: u64,
         expiration: i64,
+        taker: Option<Pubkey>,
     ) -> Result<()> {
         ctx.accounts
-            .init_escrow(seed, receive, &ctx.bumps, expiration)?;
+            .init_escrow(seed, receive, &ctx.bumps, expiration, taker)?;
         ctx.accounts.deposit(deposit)
     }
 
     #[instruction(discriminator = 1)]
     pub fn take(ctx: Context<Take>) -> Result<()> {
+        ctx.accounts.check_conditions()?;
         ctx.accounts.deposit()?;
         ctx.accounts.withdraw_and_close_vault()
     }
@@ -40,7 +42,12 @@ pub mod escrowq42026 {
     }
 
     #[instruction(discriminator = 3)]
-    pub fn update(ctx: Context<Update>, receive: u64) -> Result<()> {
-        ctx.accounts.update_escrow(receive)
+    pub fn update(
+        ctx: Context<Update>,
+        receive: u64,
+        expiration: i64,
+        taker: Option<Pubkey>,
+    ) -> Result<()> {
+        ctx.accounts.update_escrow(receive, expiration, taker)
     }
 }
