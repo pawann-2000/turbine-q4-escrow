@@ -7,7 +7,8 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-escrowq32026 = "5Y6HMSgNYbkcBiQCukYvTK56aQarSpq1Nk9aiSsjws2o"
+escrowq42026 = "5Y6HMSgNYbkcBiQCukYvTK56aQarSpq1Nk9aiSsjws2o"
+vault = "D4esTuckKbgchn4AaYWFWFoLccnT9kzspXMKf38xzHN4"
 
 [provider]
 cluster = "localnet"
